@@ -1,0 +1,30 @@
+{
+  "name": "facebook-scraper",
+  "version": "1.0.0",
+  "description": "Facebook page post scraper (GraphQL replay) with a minimal React web UI.",
+  "type": "commonjs",
+  "main": "scraper.js",
+  "scripts": {
+    "cli": "node scraper.js",
+    "server": "node server/server.js",
+    "web": "pnpm -C web run dev",
+    "dev": "concurrently -n server,web -c blue,green \"nodemon --watch server --watch lib server/server.js\" \"pnpm -C web run dev\"",
+    "build": "pnpm -C web install && pnpm -C web run build",
+    "start": "node server/server.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "puppeteer": "^24.15.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "nodemon": "^3.1.9"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "puppeteer"
+    ]
+  }
+}
