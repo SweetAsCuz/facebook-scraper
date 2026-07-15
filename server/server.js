@@ -44,12 +44,22 @@ function proxyConfig(useProxy) {
 // ---- run state (polled by the UI) ------------------------------------------
 let scraper = null;
 const run = {
-  phase: 'idle', // idle|launching|navigating|awaiting-gate|capturing|scraping|done|error|stopped
+  phase: 'idle', // idle|launching|navigating|awaiting-gate|capturing|scraping|scouting|scouted|done|error|stopped
   count: 0,
   posts: [],
   error: null,
   stopReason: null, // why pagination ended (facebook-cap | parser-gap | end-of-feed | ...)
+  scout: null, // scout result { birthYear, oldestTimestamp, span, suggestedChains, ... }
+  scoutYear: null, // year currently being probed (live scout feedback)
+  windows: {}, // per-window progress for the live grid: key -> { key, kind, year, month, state, count }
+  chainsActive: 0, // how many windows are paginating right now
+  concurrency: 0, // planned max concurrent chains
 };
+
+// Recompute the number of windows currently in the 'active' state.
+function countActive() {
+  return Object.values(run.windows).filter((w) => w.state === 'active').length;
+}
 
 // ---- speed presets ---------------------------------------------------------
 const SPEED = {
@@ -82,7 +92,8 @@ app.post('/api/start', (req, res) => {
   if (scraper) {
     return res.status(409).json({ error: 'A scrape is already running.' });
   }
-  const { pageUrl, mode, value, speed, useProxy, waitForLogin } = req.body || {};
+  const { pageUrl, mode, value, speed, useProxy, waitForLogin, chains, months } =
+    req.body || {};
   if (!pageUrl || !/^https?:\/\/.+facebook\.com/i.test(pageUrl)) {
     return res
       .status(400)
@@ -103,6 +114,9 @@ app.post('/api/start', (req, res) => {
   run.posts = [];
   run.error = null;
   run.stopReason = null;
+  run.windows = {};
+  run.chainsActive = 0;
+  run.concurrency = 0;
 
   scraper = new Scraper({
     PAGE_URL: pageUrl,
@@ -110,6 +124,12 @@ app.post('/api/start', (req, res) => {
     // In login-wait mode, DON'T auto-close the login popup — the user needs it
     // to log in (logging in unlocks far deeper pagination than ~100 posts).
     AUTO_DISMISS_MODAL: !waitForLogin,
+    // Parallel-by-year chain count (1 = classic single feed chain). Capped at
+    // 21 = the max number of year windows (2006–present); the scraper clamps
+    // again to the actual window count.
+    CONCURRENCY: Math.max(1, Math.min(21, Number(chains) || 1)),
+    // Auto-split dense years into monthly sub-chains to keep all chains busy.
+    SUBDIVIDE_MONTHS: !!months,
     ...configForSpeed(speed),
     ...configForScope(mode, value),
     ...px,
@@ -126,8 +146,39 @@ app.post('/api/start', (req, res) => {
   scraper.on('status', (s) => {
     run.phase = s.phase;
   });
+  // Full window plan (parallel-by-year): seed every year cell up front.
+  scraper.on('plan', (p) => {
+    run.concurrency = p.concurrency || 0;
+    run.windows = {};
+    for (const w of p.windows || []) run.windows[w.key] = { ...w };
+    run.chainsActive = countActive();
+  });
+  // Per-window lifecycle transitions (queued → active → done/split).
+  scraper.on('window', (w) => {
+    const cur =
+      run.windows[w.key] ||
+      (run.windows[w.key] = { key: w.key, count: 0, state: 'queued' });
+    if (w.state) cur.state = w.state;
+    if (w.kind) cur.kind = w.kind;
+    if (typeof w.year === 'number') cur.year = w.year;
+    if (typeof w.month === 'number') cur.month = w.month;
+    if (typeof w.count === 'number') cur.count = w.count;
+    run.chainsActive = countActive();
+  });
   scraper.on('progress', (p) => {
     run.count = p.total;
+    if (!p.window) return;
+    const cur =
+      run.windows[p.window] ||
+      (run.windows[p.window] = { key: p.window, count: 0, state: 'active' });
+    cur.state = 'active';
+    if (p.kind) cur.kind = p.kind;
+    if (typeof p.year === 'number') cur.year = p.year;
+    if (typeof p.month === 'number') cur.month = p.month;
+    // Show the real total in the window, not "new this run" (which is ~0 on a
+    // resume and made every cell misleadingly show 0).
+    if (typeof p.windowTotal === 'number') cur.count = p.windowTotal;
+    run.chainsActive = countActive();
   });
   scraper.on('log', (msg) => console.log('[scraper]', msg));
   scraper.on('done', (d) => {
@@ -157,6 +208,76 @@ app.post('/api/start', (req, res) => {
   res.json({ ok: true });
 });
 
+// ---- POST /api/scout -------------------------------------------------------
+// Cheaply find a page's date span (oldest post / active years) without a full
+// scrape, so the user can size their chain count before committing.
+app.post('/api/scout', (req, res) => {
+  if (scraper) {
+    return res
+      .status(409)
+      .json({ error: 'Busy — a scrape or scout is already running.' });
+  }
+  const { pageUrl, useProxy, waitForLogin } = req.body || {};
+  if (!pageUrl || !/^https?:\/\/.+facebook\.com/i.test(pageUrl)) {
+    return res
+      .status(400)
+      .json({ error: 'Please provide a valid facebook.com page URL.' });
+  }
+  const px = proxyConfig(useProxy);
+  if (px === null) {
+    return res.status(400).json({
+      error:
+        'Proxy requested but not configured. Add PROXY_SERVER to your .env file.',
+    });
+  }
+
+  run.phase = 'launching';
+  run.error = null;
+  run.scout = null;
+  run.scoutYear = null;
+
+  scraper = new Scraper({
+    PAGE_URL: pageUrl,
+    HEADLESS: false,
+    AUTO_DISMISS_MODAL: !waitForLogin,
+    ...px,
+  });
+  if (!waitForLogin) {
+    scraper.on('gate', () =>
+      setTimeout(() => scraper && scraper.continue(), 2500)
+    );
+  }
+  scraper.on('status', (s) => {
+    run.phase = s.phase;
+  });
+  scraper.on('progress', (p) => {
+    if (p.scoutYear) run.scoutYear = p.scoutYear;
+  });
+  scraper.on('log', (msg) => console.log('[scout]', msg));
+  scraper.on('error', (e) => {
+    run.error = e.message;
+  });
+
+  (async () => {
+    try {
+      const result = await scraper.scout();
+      run.scout = result;
+      if (result) run.phase = 'scouted';
+      else if (run.phase !== 'stopped') run.phase = 'error';
+    } catch (err) {
+      run.error = err.message;
+      run.phase = 'error';
+    } finally {
+      try {
+        await scraper.close();
+      } catch {}
+      scraper = null;
+    }
+  })();
+
+  res.json({ ok: true });
+});
+
 // ---- GET /api/status (polled) ----------------------------------------------
 app.get('/api/status', (req, res) => {
   const finished = ['done', 'stopped', 'error'].includes(run.phase);
@@ -166,6 +287,12 @@ app.get('/api/status', (req, res) => {
     running: !!scraper,
     error: run.error,
     stopReason: run.stopReason,
+    scout: run.scout,
+    scoutYear: run.scoutYear,
+    // Live window grid (parallel-by-year runs only; empty for single-chain).
+    windows: Object.values(run.windows),
+    chainsActive: run.chainsActive,
+    concurrency: run.concurrency,
     // Only ship the (potentially large) posts array once finished.
     posts: finished ? run.posts : undefined,
   });

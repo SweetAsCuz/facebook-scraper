@@ -28,13 +28,24 @@ const COLUMNS = [
 // Sensible default selection.
 const DEFAULT_COLS = ['timestamp', 'reactions', 'comments', 'shares', 'url'];
 
+// How many rows to render in the on-screen preview. The full set is always in
+// the JSON/CSV downloads — the table is just a sample so huge runs stay snappy.
+const PREVIEW_LIMIT = 20;
+
+// Short month labels for the split-year strip in the live progress grid.
+const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+// Icon + label for each window state (used by the live grid).
+const WIN_ICON = { active: '●', done: '✓', split: '⚡', queued: '·' };
+
 export default function App() {
   const [pageUrl, setPageUrl] = useState('https://www.facebook.com/Badmintonwithu2013');
   const [mode, setMode] = useState('all');
   const [speed, setSpeed] = useState('balanced'); // safe | balanced | fast
+  const [chains, setChains] = useState(1); // parallel year-chains; 1 = single feed
+  const [months, setMonths] = useState(true); // split dense years into month-chains
   const [useProxy, setUseProxy] = useState(false);
   const [proxyConfigured, setProxyConfigured] = useState(false);
-  const [waitForLogin, setWaitForLogin] = useState(false);
+  const [waitForLogin, setWaitForLogin] = useState(true);
 
   // per-mode inputs
   const [count, setCount] = useState(100);
@@ -49,6 +60,15 @@ export default function App() {
   const [posts, setPosts] = useState([]);
   const [stopReason, setStopReason] = useState(null);
 
+  // Live per-window progress (parallel-by-year runs): the window grid.
+  const [windows, setWindows] = useState([]);
+  const [chainsActive, setChainsActive] = useState(0);
+
+  // Scout: quick date-range probe before a full run.
+  const [scoutState, setScoutState] = useState('idle'); // idle|running|done|error
+  const [scout, setScout] = useState(null); // result summary
+  const [scoutYear, setScoutYear] = useState(null); // year being probed (live)
+
   // Which output columns to show/export (Set of column keys).
   const [cols, setCols] = useState(new Set(DEFAULT_COLS));
   function toggleCol(key) {
@@ -62,17 +82,73 @@ export default function App() {
   const activeCols = COLUMNS.filter((c) => cols.has(c.key));
 
   const pollRef = useRef(null);
+  const scoutPollRef = useRef(null);
 
   // Ask the backend whether a proxy is configured in .env.
   useEffect(() => {
     fetch('/api/info')
       .then((r) => r.json())
-      .then((d) => setProxyConfigured(!!d.proxyConfigured))
+      .then((d) => {
+        const ok = !!d.proxyConfigured;
+        setProxyConfigured(ok);
+        // Auto-tick proxy when one is actually configured in .env; leaving it on
+        // without a configured proxy would make Start fail with a 400.
+        setUseProxy(ok);
+      })
       .catch(() => {});
   }, []);
 
   // Stop polling on unmount.
-  useEffect(() => () => clearInterval(pollRef.current), []);
+  useEffect(
+    () => () => {
+      clearInterval(pollRef.current);
+      clearInterval(scoutPollRef.current);
+    },
+    []
+  );
+
+  // Quick date-range probe. Reuses the same gate (Continue) as a scrape.
+  async function scoutPage() {
+    setScout(null);
+    setScoutYear(null);
+    setError('');
+    setScoutState('running');
+    try {
+      const res = await fetch('/api/scout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pageUrl, useProxy, waitForLogin }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Could not start scout.');
+      clearInterval(scoutPollRef.current);
+      scoutPollRef.current = setInterval(async () => {
+        try {
+          const r = await fetch('/api/status');
+          const d = await r.json();
+          setPhase(d.phase);
+          if (d.scoutYear) setScoutYear(d.scoutYear);
+          if (d.phase === 'error') {
+            setError(d.error || 'Scout failed.');
+            setScoutState('error');
+            clearInterval(scoutPollRef.current);
+          } else if (d.phase === 'scouted') {
+            setScout(d.scout);
+            setScoutState('done');
+            clearInterval(scoutPollRef.current);
+          } else if (d.phase === 'stopped') {
+            setScoutState('idle');
+            clearInterval(scoutPollRef.current);
+          }
+        } catch {
+          /* transient; keep polling */
+        }
+      }, 1000);
+    } catch (e) {
+      setError(e.message);
+      setScoutState('error');
+    }
+  }
 
   // Poll the backend for live count + finish state (robust through dev proxy).
   function startPolling() {
@@ -84,6 +160,8 @@ export default function App() {
         setPhase(d.phase);
         if (typeof d.count === 'number') setLiveCount(d.count);
         if (d.stopReason) setStopReason(d.stopReason);
+        if (Array.isArray(d.windows)) setWindows(d.windows);
+        if (typeof d.chainsActive === 'number') setChainsActive(d.chainsActive);
 
         if (d.phase === 'error') {
           setError(d.error || 'Scrape failed.');
@@ -121,6 +199,8 @@ export default function App() {
     setPosts([]);
     setLiveCount(0);
     setStopReason(null);
+    setWindows([]);
+    setChainsActive(0);
     try {
       const res = await fetch('/api/start', {
         method: 'POST',
@@ -128,6 +208,8 @@ export default function App() {
         body: JSON.stringify({
           pageUrl,
           speed,
+          chains,
+          months,
           useProxy,
           waitForLogin,
           ...scopePayload(),
@@ -177,11 +259,22 @@ export default function App() {
     triggerDownload(await res.blob(), 'posts.csv');
   }
 
+  // Columns rendered as right-aligned, comma-grouped numbers.
+  const NUM_COLS = new Set(['reactions', 'comments', 'shares']);
+
   // Render a single cell value based on the column key.
   function renderCell(p, key) {
     const v = p[key];
     if (key === 'timestamp')
-      return v ? new Date(v * 1000).toLocaleDateString() : '';
+      return v
+        ? new Date(v * 1000).toLocaleDateString(undefined, {
+            year: 'numeric',
+            month: 'short',
+            day: 'numeric',
+          })
+        : '';
+    if (NUM_COLS.has(key))
+      return typeof v === 'number' ? v.toLocaleString() : v || 0;
     if (key === 'url')
       return v ? (
         <a href={v} target="_blank" rel="noreferrer">
@@ -212,6 +305,31 @@ export default function App() {
 
   const running = status === 'running';
 
+  // Organize the live windows into year cells + month strips for the grid.
+  const yearCells = windows
+    .filter((w) => w.kind === 'year')
+    .sort((a, b) => b.year - a.year);
+  const monthsByYear = {};
+  for (const w of windows) {
+    if (w.kind === 'month') (monthsByYear[w.year] ||= []).push(w);
+  }
+  // Only render month strips for years that actually split (have month cells).
+  const splitYears = yearCells.filter((w) => monthsByYear[w.year]);
+
+  // Oldest → newest date span of the collected posts (for the results header).
+  const dateSpan = (() => {
+    const ts = posts.map((p) => p.timestamp).filter((t) => typeof t === 'number');
+    if (!ts.length) return null;
+    const fmt = (t) =>
+      new Date(t * 1000).toLocaleDateString(undefined, {
+        year: 'numeric',
+        month: 'short',
+      });
+    const lo = fmt(Math.min(...ts));
+    const hi = fmt(Math.max(...ts));
+    return lo === hi ? lo : `${lo} – ${hi}`;
+  })();
+
   return (
     <div className="wrap">
       <h1>Facebook Page Scraper</h1>
@@ -223,7 +341,9 @@ export default function App() {
 
       <div className="card">
         <label>
-          Page URL
+          <span className="scope-title">
+            <span className="step">1</span> Which page?
+          </span>
           <input
             type="text"
             value={pageUrl}
@@ -233,9 +353,65 @@ export default function App() {
           />
         </label>
 
+        {/* Scout: quick date-range probe before committing to a full run */}
+        <div className="scout">
+          <button
+            type="button"
+            className="scout-btn"
+            onClick={scoutPage}
+            disabled={running || scoutState === 'running'}
+          >
+            {scoutState === 'running' ? 'Scouting…' : '🔍 Scout date range'}
+          </button>
+          {scoutState === 'running' && (
+            <span className="hint">
+              Probing years{scoutYear ? ` — up to ${scoutYear}` : ''}… finding the
+              oldest post. A Chrome window opens.
+            </span>
+          )}
+          {scoutState === 'done' &&
+            scout &&
+            (scout.birthYear === null ? (
+              <span className="hint">No posts found on this page.</span>
+            ) : (
+              <span className="scout-result">
+                Oldest post{' '}
+                <b>
+                  {scout.oldestTimestamp
+                    ? new Date(
+                        scout.oldestTimestamp * 1000
+                      ).toLocaleDateString(undefined, {
+                        year: 'numeric',
+                        month: 'short',
+                        day: 'numeric',
+                      })
+                    : scout.birthYear}
+                </b>{' '}
+                · active{' '}
+                <b>
+                  {scout.birthYear}–{scout.currentYear}
+                </b>{' '}
+                ({scout.span} yrs)
+                <button
+                  type="button"
+                  className="use-chains"
+                  onClick={() => {
+                    setChains(scout.suggestedChains);
+                    setMonths(true);
+                  }}
+                  disabled={running}
+                >
+                  Use {scout.suggestedChains} chains
+                </button>
+              </span>
+            ))}
+        </div>
+
         {/* Scope selector */}
         <div className="scope">
-          <span className="scope-title">How much to scrape</span>
+          <span className="scope-title">
+            <span className="step">2</span> How much to scrape?
+          </span>
           <div className="segmented">
             {MODES.map((m) => (
               <button
@@ -325,30 +501,11 @@ export default function App() {
           )}
         </div>
 
-        {/* Column / field selector */}
-        <div className="scope">
-          <span className="scope-title">Fields to collect</span>
-          <div className="fields">
-            <span className="chip locked">Text</span>
-            {COLUMNS.map((c) => (
-              <button
-                key={c.key}
-                type="button"
-                className={cols.has(c.key) ? 'chip active' : 'chip'}
-                onClick={() => toggleCol(c.key)}
-                disabled={running}
-              >
-                {cols.has(c.key) ? '✓ ' : ''}
-                {c.label}
-              </button>
-            ))}
-          </div>
-          <p className="hint">Text is always included. Toggle the rest.</p>
-        </div>
-
         {/* Speed selector */}
         <div className="scope">
-          <span className="scope-title">Speed</span>
+          <span className="scope-title">
+            <span className="step">3</span> How fast?
+          </span>
           <div className="segmented">
             {[
               { key: 'safe', label: 'Safe' },
@@ -367,10 +524,57 @@ export default function App() {
             ))}
           </div>
           <p className="hint">
-            Faster = more posts per request &amp; shorter delays, but higher
-            chance of a checkpoint on long runs.
+            Shorter delays between requests. Faster finishes sooner but raises
+            the chance of a checkpoint on long runs. (Facebook always returns ~3
+            posts per request — speed only changes the waiting, not the batch.)
           </p>
         </div>
+
+        {/* Parallel years */}
+        <div className="scope">
+          <span className="scope-title">
+            <span className="step">4</span> Parallel years
+          </span>
+          <div className="segmented">
+            {[1, 2, 4, 6, 8, 12, 16].map((n) => (
+              <button
+                key={n}
+                type="button"
+                className={chains === n ? 'seg active' : 'seg'}
+                onClick={() => setChains(n)}
+                disabled={running}
+              >
+                {n}
+              </button>
+            ))}
+          </div>
+          <p className="hint">
+            {chains === 1
+              ? 'One feed, newest → oldest (default, slowest). Facebook drips ~3 posts per request.'
+              : `Scrapes ${chains} years at the same time — up to ~${chains}× faster. Covers ALL years either way; this just controls how many run at once. Ceiling is 21 (one per year, 2006→now) — beyond a page’s age the extra chains hit empty years and idle. More chains = louder to Facebook = higher checkpoint risk. Needs login.`}
+          </p>
+          {chains > 1 && (
+            <label className="checkrow subopt">
+              <input
+                type="checkbox"
+                checked={months}
+                onChange={(e) => setMonths(e.target.checked)}
+                disabled={running}
+              />
+              <span>Split dense years into months</span>
+            </label>
+          )}
+          {chains > 1 && (
+            <p className="hint">
+              When a single year has lots of posts, one chain crawling it becomes
+              the bottleneck while other chains finish and sit idle. This hands
+              that year to 12 monthly sub-chains so every chain stays busy —
+              fastest on high-volume pages. Sparse years are untouched.
+            </p>
+          )}
+        </div>
+
+        <div className="advanced-head">Advanced</div>
 
         {/* Proxy toggle (credentials live in .env, never here) */}
         <div className="scope">
@@ -420,7 +624,7 @@ export default function App() {
         </div>
       </div>
 
-      {running && phase === 'awaiting-gate' && (
+      {(running || scoutState === 'running') && phase === 'awaiting-gate' && (
         <div className="note gate">
           <p>
             ⏸ Waiting. If needed, log in or solve any checkpoint in the Chrome
@@ -431,7 +635,47 @@ export default function App() {
           </button>
         </div>
       )}
-      {running && phase !== 'awaiting-gate' && (
+      {running && phase !== 'awaiting-gate' && yearCells.length > 0 && (
+        <div className="pgrid">
+          <div className="pgrid-head">
+            <span className="dot" /> Scraping · <b>{chainsActive}</b>{' '}
+            {chainsActive === 1 ? 'chain' : 'chains'} active ·{' '}
+            <b>{liveCount.toLocaleString()}</b> posts
+          </div>
+          <div className="pgrid-years">
+            {yearCells.map((w) => (
+              <div key={w.key} className={`pcell ${w.state}`}>
+                <span className="pcell-year">{w.year}</span>
+                <span className="pcell-icon">{WIN_ICON[w.state] || '·'}</span>
+                <span className="pcell-count">
+                  {w.state === 'split'
+                    ? 'months ↓'
+                    : (w.count || 0).toLocaleString()}
+                </span>
+              </div>
+            ))}
+          </div>
+          {splitYears.map((w) => (
+            <div key={`${w.key}-months`} className="pgrid-months">
+              <span className="pmonths-label">{w.year} →</span>
+              {MONTHS.map((mn, mi) => {
+                const mw = monthsByYear[w.year].find((x) => x.month === mi);
+                const st = mw ? mw.state : 'none';
+                return (
+                  <span
+                    key={mi}
+                    className={`pmonth ${st}`}
+                    title={mw ? `${mn} ${w.year}: ${mw.count || 0} posts` : ''}
+                  >
+                    {mn}
+                  </span>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      )}
+      {running && phase !== 'awaiting-gate' && yearCells.length === 0 && (
         <p className="note live">
           <span className="dot" /> Scraping… <b>{liveCount}</b> posts so far.
           Keep the Chrome window open.
@@ -479,31 +723,60 @@ export default function App() {
       {posts.length > 0 && (
         <div className="results">
           <div className="results-head">
-            <span>{posts.length} posts</span>
+            <span className="results-summary">
+              <b>{posts.length.toLocaleString()}</b> posts
+              {dateSpan && <span className="span"> · {dateSpan}</span>}
+            </span>
             <div>
               <button onClick={downloadJson}>Download JSON</button>
               <button onClick={downloadCsv}>Download CSV</button>
             </div>
           </div>
+
+          {/* Column picker — lives next to the preview it controls. */}
+          <div className="results-cols">
+            <span className="results-cols-label">Columns:</span>
+            <span className="chip locked">Text</span>
+            {COLUMNS.map((c) => (
+              <button
+                key={c.key}
+                type="button"
+                className={cols.has(c.key) ? 'chip active' : 'chip'}
+                onClick={() => toggleCol(c.key)}
+              >
+                {cols.has(c.key) ? '✓ ' : ''}
+                {c.label}
+              </button>
+            ))}
+          </div>
+
           <table>
             <thead>
               <tr>
                 <th>#</th>
                 <th>Text</th>
                 {activeCols.map((c) => (
-                  <th key={c.key}>{c.label}</th>
+                  <th key={c.key} className={NUM_COLS.has(c.key) ? 'num' : ''}>
+                    {c.label}
+                  </th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {posts.map((p, i) => (
+              {posts.slice(0, PREVIEW_LIMIT).map((p, i) => (
                 <tr key={p.id || i}>
                   <td>{i + 1}</td>
                   <td className="text">{p.text}</td>
                   {activeCols.map((c) => (
                     <td
                       key={c.key}
-                      className={c.key === 'timestamp' ? 'date' : ''}
+                      className={
+                        c.key === 'timestamp'
+                          ? 'date'
+                          : NUM_COLS.has(c.key)
+                          ? 'num'
+                          : ''
+                      }
                     >
                       {renderCell(p, c.key)}
                     </td>
@@ -512,6 +785,13 @@ export default function App() {
               ))}
             </tbody>
           </table>
+          {posts.length > PREVIEW_LIMIT && (
+            <p className="preview-note">
+              Showing the first {PREVIEW_LIMIT} of{' '}
+              {posts.length.toLocaleString()} posts. Download the JSON or CSV for
+              the full set.
+            </p>
+          )}
         </div>
       )}
 

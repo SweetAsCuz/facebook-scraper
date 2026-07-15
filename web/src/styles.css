@@ -108,6 +108,34 @@ button.stop {
 .scope-title {
   font-weight: 600;
   font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+/* Numbered step badge in each section title. */
+.step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--fb);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+/* "Advanced" divider before the optional toggles. */
+.advanced-head {
+  margin-top: 6px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
 }
 .segmented {
   display: inline-flex;
@@ -187,6 +215,44 @@ input.num {
   cursor: pointer;
 }
 
+/* Scout row: quick date-range probe */
+.scout {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: -4px;
+}
+.scout-btn {
+  background: #fff;
+  border: 1px solid var(--fb);
+  color: var(--fb);
+}
+.scout-result {
+  font-size: 14px;
+  color: var(--ink);
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.use-chains {
+  margin-left: 6px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: var(--fb);
+  color: #fff;
+  border-color: var(--fb);
+  font-size: 13px;
+}
+
+/* Indented sub-option under a selector (e.g. month-split under chains). */
+.checkrow.subopt {
+  margin-top: 4px;
+  font-weight: 500;
+  font-size: 13px;
+}
+
 /* Field selector */
 .fields {
   display: flex;
@@ -248,6 +314,135 @@ input.num {
   }
 }
 
+/* Live progress grid (parallel-by-year window map) */
+.pgrid {
+  margin-top: 18px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.pgrid-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  color: var(--ink);
+}
+.pgrid-head b {
+  color: var(--fb);
+}
+.pgrid-years {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 8px;
+}
+/* A single year cell. */
+.pcell {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: #f7f8fa;
+  position: relative;
+  overflow: hidden;
+}
+.pcell-year {
+  font-weight: 700;
+  font-size: 14px;
+}
+.pcell-icon {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  font-size: 12px;
+}
+.pcell-count {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+/* Queued: dim and waiting. */
+.pcell.queued {
+  opacity: 0.55;
+}
+.pcell.queued .pcell-icon {
+  color: var(--muted);
+}
+/* Active: highlighted with a pulsing accent. */
+.pcell.active {
+  background: #eaf3ff;
+  border-color: var(--fb);
+}
+.pcell.active .pcell-icon {
+  color: var(--fb);
+  animation: pulse 1s infinite;
+}
+.pcell.active .pcell-count {
+  color: var(--fb);
+  font-weight: 600;
+}
+/* Done: soft green, settled. */
+.pcell.done {
+  background: #eef8f0;
+  border-color: #b5e0bf;
+}
+.pcell.done .pcell-icon {
+  color: #1a8f3c;
+}
+/* Split: handed off to month sub-chains. */
+.pcell.split {
+  background: #fff6e6;
+  border-color: #ffd98a;
+}
+.pcell.split .pcell-icon {
+  color: #c77700;
+}
+/* Month strip under a split year. */
+.pgrid-months {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  background: #fbfcfd;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+}
+.pmonths-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  margin-right: 4px;
+}
+.pmonth {
+  font-size: 11px;
+  padding: 3px 6px;
+  border-radius: 5px;
+  background: #eef0f3;
+  color: var(--muted);
+}
+.pmonth.none {
+  opacity: 0.4;
+}
+.pmonth.queued {
+  opacity: 0.6;
+}
+.pmonth.active {
+  background: var(--fb);
+  color: #fff;
+  animation: pulse 1s infinite;
+}
+.pmonth.done {
+  background: #d8f0de;
+  color: #1a8f3c;
+}
+
 .note {
   color: var(--muted);
   margin-top: 18px;
@@ -281,6 +476,39 @@ input.num {
 .results-head button {
   margin-left: 8px;
 }
+.results-summary {
+  font-weight: 400;
+}
+.results-summary b {
+  font-size: 16px;
+}
+.results-summary .span {
+  color: var(--muted);
+}
+/* Column picker sitting just above the preview table. */
+.results-cols {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  background: #fbfcfd;
+}
+.results-cols-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-right: 2px;
+}
+.preview-note {
+  margin: 0;
+  padding: 12px 16px;
+  font-size: 13px;
+  color: var(--muted);
+  border-top: 1px solid var(--line);
+  background: #fbfcfd;
+}
 
 table {
   width: 100%;
@@ -305,10 +533,31 @@ td.text {
   max-width: 520px;
   white-space: pre-wrap;
   word-break: break-word;
+  /* Keep rows tidy — show a preview, expand on hover. */
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+td.text:hover {
+  -webkit-line-clamp: unset;
 }
 td.date {
   white-space: nowrap;
   color: var(--muted);
+}
+/* Right-align comma-grouped number columns (reactions/comments/shares). */
+th.num,
+td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* Zebra striping for scannability. */
+tbody tr:nth-child(even) {
+  background: #fafbfc;
+}
+tbody tr:hover {
+  background: #f0f6ff;
 }
 tr:last-child td {
   border-bottom: none;
